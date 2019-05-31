@@ -1031,20 +1031,8 @@ static int cpu_down_maps_locked(unsigned int cpu, enum cpuhp_state target)
 
 static int do_cpu_down(unsigned int cpu, enum cpuhp_state target)
 {
+	struct cpumask newmask;
 	int err;
-
-	/*
-	 * When cpusets are enabled, the rebuilding of the scheduling
-	 * domains is deferred to a workqueue context. Make sure
-	 * that the work is completed before proceeding to the next
-	 * hotplug. Otherwise scheduler observes an inconsistent
-	 * view of online and offline CPUs in the root domain. If
-	 * the online CPUs are still stuck in the offline (default)
-	 * domain, those CPUs would not be visible when scheduling
-	 * happens on from other CPUs in the root domain.
-	 */
-	cpuset_wait_for_hotplug();
-
 	cpu_maps_update_begin();
 	err = cpu_down_maps_locked(cpu, target);
 	cpu_maps_update_done();
@@ -1262,6 +1250,7 @@ int freeze_secondary_cpus(int primary)
 {
 	int cpu, error = 0;
 
+	unaffine_perf_irqs();
 	cpu_maps_update_begin();
 	if (!cpu_online(primary))
 		primary = cpumask_first(cpu_online_mask);
@@ -1347,6 +1336,7 @@ void enable_nonboot_cpus(void)
 	cpumask_clear(frozen_cpus);
 out:
 	cpu_maps_update_done();
+	reaffine_perf_irqs();
 }
 
 static int __init alloc_frozen_cpus(void)
