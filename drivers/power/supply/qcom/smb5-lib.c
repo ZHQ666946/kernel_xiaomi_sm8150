@@ -19,6 +19,7 @@
 #include <linux/irq.h>
 #include <linux/iio/consumer.h>
 #include <linux/pmic-voter.h>
+#include <linux/module.h>
 #include <linux/of_batterydata.h>
 #include "smb5-lib.h"
 #include "smb5-reg.h"
@@ -44,6 +45,9 @@
 	((typec_mode == POWER_SUPPLY_TYPEC_SOURCE_MEDIUM	\
 	|| typec_mode == POWER_SUPPLY_TYPEC_SOURCE_HIGH)	\
 	&& !chg->typec_legacy)
+
+bool skip_thermal = false;
+module_param(skip_thermal, bool, 0644);
 
 static bool off_charge_flag;
 
@@ -2629,11 +2633,17 @@ static int smblib_therm_charging(struct smb_charger *chg)
 {
 	int thermal_icl_ua = 0;
 	int thermal_fcc_ua = 0;
+	int temp_level;
 	int rc;
 
 	if (chg->system_temp_level >= MAX_TEMP_LEVEL)
 		return 0;
 
+	if (skip_thermal) {
+ 		temp_level = chg->system_temp_level;
+ 		chg->system_temp_level = 0;
+ 	}
+	
 	switch (chg->real_charger_type) {
 	case POWER_SUPPLY_TYPE_USB_HVDCP:
 		thermal_icl_ua = chg->thermal_mitigation_qc2[chg->system_temp_level];
@@ -2742,6 +2752,10 @@ static int smblib_therm_charging(struct smb_charger *chg)
 		}
 	}
 
+	if (skip_thermal) {
+ 		chg->system_temp_level = temp_level;
+ 	}
+	
 	return rc;
 }
 #endif
