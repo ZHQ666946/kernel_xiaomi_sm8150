@@ -21,6 +21,7 @@
 
 #include "dsi_panel.h"
 #include "dsi_display.h"
+#include <linux/display_state.h>
 #include "dsi_ctrl_hw.h"
 #include "dsi_parser.h"
 #ifdef CONFIG_KLAPSE
@@ -467,6 +468,8 @@ static int dsi_panel_power_on(struct dsi_panel *panel)
 		goto exit;
 	}
 
+	display_on = true;
+	
 	rc = dsi_panel_set_pinctrl_state(panel, true);
 	if (rc) {
 		pr_err("[%s] failed to set pinctrl, rc=%d\n", panel->name, rc);
@@ -524,6 +527,8 @@ static int dsi_panel_power_off(struct dsi_panel *panel)
 	if (rc)
 		pr_err("[%s] failed to enable vregs, rc=%d\n", panel->name, rc);
 
+	display_on = false;
+	
 	return rc;
 }
 static int dsi_panel_tx_cmd_set(struct dsi_panel *panel,
