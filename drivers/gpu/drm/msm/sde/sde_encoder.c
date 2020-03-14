@@ -1916,7 +1916,7 @@ static int _sde_encoder_update_rsc_client(
 			  && disp_info->is_primary && !qsync_mode) ?
 			 SDE_RSC_CMD_STATE : SDE_RSC_VID_STATE) :
 			SDE_RSC_IDLE_STATE;
-
+	rsc_state = SDE_RSC_CLK_STATE;
 	SDE_EVT32(rsc_state, qsync_mode);
 
 	prefill_lines = config ? mode_info.prefill_lines +
