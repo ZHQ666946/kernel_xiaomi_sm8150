@@ -54,7 +54,9 @@ modules.builtin
 /vmlinuz
 /System.map
 /Module.markers
-
+mi9.sh
+out
+/out
 #
 # RPM spec file (make rpm-pkg)
 #
