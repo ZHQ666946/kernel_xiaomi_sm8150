@@ -377,7 +377,7 @@ void __init cpu_smt_disable(bool force)
 		return;
 
 	if (force) {
-		pr_info("SMT: Force disabled\n");
+		pr_debug("SMT: Force disabled\n");
 		cpu_smt_control = CPU_SMT_FORCE_DISABLED;
 	} else {
 		pr_info("SMT: disabled\n");
@@ -1289,7 +1289,7 @@ int freeze_secondary_cpus(int primary)
 	if (!error)
 		BUG_ON(num_online_cpus() > 1);
 	else
-		pr_err("Non-boot CPUs are not disabled\n");
+		pr_debug("Non-boot CPUs are not disabled\n");
 
 	/*
 	 * Make sure the CPUs won't be enabled by someone else. We need to do
