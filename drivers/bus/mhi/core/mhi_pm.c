@@ -1,4 +1,4 @@
-/* Copyright (c) 2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -853,6 +853,39 @@ error_dev_ctxt:
 }
 EXPORT_SYMBOL(mhi_async_power_up);
 
+/* Transition MHI into error state and notify critical clients */
+void mhi_control_error(struct mhi_controller *mhi_cntrl)
+{
+	enum MHI_PM_STATE cur_state;
+
+	MHI_LOG("Enter with pm_state:%s MHI_STATE:%s\n",
+		to_mhi_pm_state_str(mhi_cntrl->pm_state),
+		TO_MHI_STATE_STR(mhi_cntrl->dev_state));
+
+	write_lock_irq(&mhi_cntrl->pm_lock);
+	cur_state = mhi_tryset_pm_state(mhi_cntrl, MHI_PM_LD_ERR_FATAL_DETECT);
+	write_unlock_irq(&mhi_cntrl->pm_lock);
+
+	if (cur_state != MHI_PM_LD_ERR_FATAL_DETECT) {
+		MHI_ERR("Failed to transition to state:%s from:%s\n",
+			to_mhi_pm_state_str(MHI_PM_LD_ERR_FATAL_DETECT),
+			to_mhi_pm_state_str(cur_state));
+		goto exit_control_error;
+	}
+
+	/* notify waiters to bail out early since MHI has entered ERROR state */
+	wake_up_all(&mhi_cntrl->state_event);
+
+	/* start notifying all clients who request early notification */
+	device_for_each_child(mhi_cntrl->dev, NULL, mhi_early_notify_device);
+
+exit_control_error:
+	MHI_LOG("Exit with pm_state:%s MHI_STATE:%s\n",
+		to_mhi_pm_state_str(mhi_cntrl->pm_state),
+		TO_MHI_STATE_STR(mhi_cntrl->dev_state));
+}
+EXPORT_SYMBOL(mhi_control_error);
+
 void mhi_power_down(struct mhi_controller *mhi_cntrl, bool graceful)
 {
 	enum MHI_PM_STATE cur_state;
@@ -931,24 +964,23 @@ int mhi_pm_suspend(struct mhi_controller *mhi_cntrl)
 				 MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state),
 				 msecs_to_jiffies(mhi_cntrl->timeout_ms));
 
-	read_lock_bh(&mhi_cntrl->pm_lock);
-	mhi_cntrl->wake_put(mhi_cntrl, false);
-	read_unlock_bh(&mhi_cntrl->pm_lock);
-
 	if (!ret || MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state)) {
 		MHI_ERR(
 			"Did not enter M0||M1 state, cur_state:%s pm_state:%s\n",
 			TO_MHI_STATE_STR(mhi_cntrl->dev_state),
 			to_mhi_pm_state_str(mhi_cntrl->pm_state));
-		return -EIO;
+		ret = -EIO;
+		goto error_m0_entry;
 	}
 
 	write_lock_irq(&mhi_cntrl->pm_lock);
 
-	if (atomic_read(&mhi_cntrl->dev_wake)) {
+	/* we're asserting wake so count would be @ least 1 */
+	if (atomic_read(&mhi_cntrl->dev_wake) > 1) {
 		MHI_VERB("Busy, aborting M3\n");
 		write_unlock_irq(&mhi_cntrl->pm_lock);
-		return -EBUSY;
+		ret = -EBUSY;
+		goto error_m0_entry;
 	}
 
 	/* anytime after this, we will resume thru runtime pm framework */
@@ -959,11 +991,14 @@ int mhi_pm_suspend(struct mhi_controller *mhi_cntrl)
 		MHI_ERR("Error setting to pm_state:%s from pm_state:%s\n",
 			to_mhi_pm_state_str(MHI_PM_M3_ENTER),
 			to_mhi_pm_state_str(mhi_cntrl->pm_state));
-		return -EIO;
+
+		ret = -EIO;
+		goto error_m0_entry;
 	}
 
 	/* set dev to M3 and wait for completion */
 	mhi_set_mhi_state(mhi_cntrl, MHI_STATE_M3);
+	mhi_cntrl->wake_put(mhi_cntrl, false);
 	write_unlock_irq(&mhi_cntrl->pm_lock);
 	MHI_LOG("Wait for M3 completion\n");
 
@@ -988,6 +1023,13 @@ int mhi_pm_suspend(struct mhi_controller *mhi_cntrl)
 	}
 
 	return 0;
+
+error_m0_entry:
+	read_lock_bh(&mhi_cntrl->pm_lock);
+	mhi_cntrl->wake_put(mhi_cntrl, false);
+	read_unlock_bh(&mhi_cntrl->pm_lock);
+
+	return ret;
 }
 EXPORT_SYMBOL(mhi_pm_suspend);
 
@@ -1058,6 +1100,7 @@ int __mhi_device_get_sync(struct mhi_controller *mhi_cntrl)
 	read_lock_bh(&mhi_cntrl->pm_lock);
 	mhi_cntrl->wake_get(mhi_cntrl, true);
 	if (MHI_PM_IN_SUSPEND_STATE(mhi_cntrl->pm_state)) {
+		pm_wakeup_event(&mhi_cntrl->mhi_dev->dev, 0);
 		mhi_cntrl->runtime_get(mhi_cntrl, mhi_cntrl->priv_data);
 		mhi_cntrl->runtime_put(mhi_cntrl, mhi_cntrl->priv_data);
 	}
@@ -1081,7 +1124,7 @@ int __mhi_device_get_sync(struct mhi_controller *mhi_cntrl)
 	return 0;
 }
 
-void mhi_device_get(struct mhi_device *mhi_dev)
+void mhi_device_get(struct mhi_device *mhi_dev, int vote)
 {
 	struct mhi_controller *mhi_cntrl = mhi_dev->mhi_cntrl;
 
@@ -1092,7 +1135,7 @@ void mhi_device_get(struct mhi_device *mhi_dev)
 }
 EXPORT_SYMBOL(mhi_device_get);
 
-int mhi_device_get_sync(struct mhi_device *mhi_dev)
+int mhi_device_get_sync(struct mhi_device *mhi_dev, int vote)
 {
 	struct mhi_controller *mhi_cntrl = mhi_dev->mhi_cntrl;
 	int ret;
@@ -1105,7 +1148,7 @@ int mhi_device_get_sync(struct mhi_device *mhi_dev)
 }
 EXPORT_SYMBOL(mhi_device_get_sync);
 
-void mhi_device_put(struct mhi_device *mhi_dev)
+void mhi_device_put(struct mhi_device *mhi_dev, int vote)
 {
 	struct mhi_controller *mhi_cntrl = mhi_dev->mhi_cntrl;
 

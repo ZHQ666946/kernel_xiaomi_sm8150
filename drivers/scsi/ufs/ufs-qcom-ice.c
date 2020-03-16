@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -179,7 +179,8 @@ static void ufs_qcom_ice_cfg_work(struct work_struct *work)
 		return;
 
 	spin_lock_irqsave(&qcom_host->ice_work_lock, flags);
-	if (!qcom_host->req_pending) {
+	if (!qcom_host->req_pending ||
+			ufshcd_is_shutdown_ongoing(qcom_host->hba)) {
 		qcom_host->work_pending = false;
 		spin_unlock_irqrestore(&qcom_host->ice_work_lock, flags);
 		return;
@@ -225,14 +226,17 @@ int ufs_qcom_ice_init(struct ufs_qcom_host *qcom_host)
 	}
 
 	qcom_host->dbg_print_en |= UFS_QCOM_ICE_DEFAULT_DBG_PRINT_EN;
-	ice_workqueue = alloc_workqueue("ice-set-key",
-			WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
 	if (!ice_workqueue) {
-		dev_err(ufs_dev, "%s: workqueue allocation failed.\n",
+		ice_workqueue = alloc_workqueue("ice-set-key",
+			WQ_MEM_RECLAIM | WQ_HIGHPRI | WQ_FREEZABLE, 0);
+		if (!ice_workqueue) {
+			dev_err(ufs_dev, "%s: workqueue allocation failed.\n",
 			__func__);
-		goto out;
+			err = -ENOMEM;
+			goto out;
+		}
+		INIT_WORK(&qcom_host->ice_cfg_work, ufs_qcom_ice_cfg_work);
 	}
-	INIT_WORK(&qcom_host->ice_cfg_work, ufs_qcom_ice_cfg_work);
 
 out:
 	return err;
@@ -285,6 +289,17 @@ int ufs_qcom_ice_req_setup(struct ufs_qcom_host *qcom_host,
 			 * propagate so it will be re-queued.
 			 */
 			if (err == -EAGAIN) {
+				if (!ice_workqueue) {
+					spin_unlock_irqrestore(
+					&qcom_host->ice_work_lock,
+					flags);
+
+					dev_err(qcom_host->hba->dev,
+						"%s: error %d workqueue NULL\n",
+						__func__, err);
+					return -EINVAL;
+				}
+
 				dev_dbg(qcom_host->hba->dev,
 					"%s: scheduling task for ice setup\n",
 					__func__);
@@ -409,6 +424,16 @@ int ufs_qcom_ice_cfg_start(struct ufs_qcom_host *qcom_host,
 			 * propagate so it will be re-queued.
 			 */
 			if (err == -EAGAIN) {
+				if (!ice_workqueue) {
+					spin_unlock_irqrestore(
+					&qcom_host->ice_work_lock,
+					flags);
+
+					dev_err(qcom_host->hba->dev,
+						"%s: error %d workqueue NULL\n",
+						__func__, err);
+					return -EINVAL;
+				}
 
 				dev_dbg(qcom_host->hba->dev,
 					"%s: scheduling task for ice setup\n",
@@ -586,6 +611,7 @@ out:
 	return err;
 }
 
+
 /**
  * ufs_qcom_ice_resume() - resumes UFS-ICE interface and ICE device from power
  * collapse
@@ -627,6 +653,28 @@ int ufs_qcom_ice_resume(struct ufs_qcom_host *qcom_host)
 	qcom_host->ice.state = UFS_QCOM_ICE_STATE_ACTIVE;
 out:
 	return err;
+}
+
+/**
+ * ufs_qcom_is_ice_busy() - lets the caller of the function know if
+ * there is any ongoing operation in ICE in workqueue context.
+ * @qcom_host:	Pointer to a UFS QCom internal host structure.
+ *		qcom_host should be a valid pointer.
+ *
+ * Return:	1 if ICE is busy, 0 if it is free.
+ *		-EINVAL in case of error.
+ */
+int ufs_qcom_is_ice_busy(struct ufs_qcom_host *qcom_host)
+{
+	if (!qcom_host) {
+		pr_err("%s: invalid qcom_host %pK", __func__,  qcom_host);
+		return -EINVAL;
+	}
+
+	if (qcom_host->req_pending)
+		return 1;
+	else
+		return 0;
 }
 
 /**

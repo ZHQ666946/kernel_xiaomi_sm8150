@@ -169,7 +169,7 @@ static inline long __trace_sched_switch_state(bool preempt, struct task_struct *
 		return TASK_REPORT_MAX;
 
 	/*
-	 * __get_task_state() uses fls(), which considers LSB as 0. So
+	 * task_state_index() uses fls() and returns a value from 0-8 range.
 	 * Decrement it by 1 (except TASK_RUNNING state i.e 0) before using
 	 * it for left shift operation to get the correct task->state
 	 * mapping.
@@ -217,9 +217,14 @@ TRACE_EVENT(sched_switch,
 
 		(__entry->prev_state & (TASK_REPORT_MAX - 1)) ?
 		  __print_flags(__entry->prev_state & (TASK_REPORT_MAX - 1), "|",
-				{ 0x01, "S" }, { 0x02, "D" }, { 0x04, "T" },
-				{ 0x08, "t" }, { 0x10, "X" }, { 0x20, "Z" },
-				{ 0x40, "P" }, { 0x80, "I" }) :
+				{ TASK_INTERRUPTIBLE, "S" },
+				{ TASK_UNINTERRUPTIBLE, "D" },
+				{ __TASK_STOPPED, "T" },
+				{ __TASK_TRACED, "t" },
+				{ EXIT_DEAD, "X" },
+				{ EXIT_ZOMBIE, "Z" },
+				{ TASK_PARKED, "P" },
+				{ TASK_DEAD, "I" }) :
 		  "R",
 
 		__entry->prev_state & TASK_REPORT_MAX ? "+" : "",
@@ -1449,10 +1454,11 @@ TRACE_EVENT(sched_task_util,
 
 	TP_PROTO(struct task_struct *p, int next_cpu, int backup_cpu,
 		int target_cpu, bool sync, bool need_idle, int fastpath,
-		bool placement_boost, int rtg_cpu, u64 start_t),
+		bool placement_boost, int rtg_cpu, u64 start_t,
+		bool stune_boosted),
 
 	TP_ARGS(p, next_cpu, backup_cpu, target_cpu, sync, need_idle, fastpath,
-		placement_boost, rtg_cpu, start_t),
+		placement_boost, rtg_cpu, start_t, stune_boosted),
 
 	TP_STRUCT__entry(
 		__field(int, pid			)
@@ -1468,6 +1474,7 @@ TRACE_EVENT(sched_task_util,
 		__field(int, placement_boost		)
 		__field(int, rtg_cpu			)
 		__field(u64, latency			)
+		__field(bool, stune_boosted		)
 	),
 
 	TP_fast_assign(
@@ -1484,13 +1491,15 @@ TRACE_EVENT(sched_task_util,
 		__entry->placement_boost	= placement_boost;
 		__entry->rtg_cpu		= rtg_cpu;
 		__entry->latency		= (sched_clock() - start_t);
+		__entry->stune_boosted		= stune_boosted;
 	),
 
-	TP_printk("pid=%d comm=%s util=%lu prev_cpu=%d next_cpu=%d backup_cpu=%d target_cpu=%d sync=%d need_idle=%d fastpath=%d placement_boost=%d rtg_cpu=%d latency=%llu",
+	TP_printk("pid=%d comm=%s util=%lu prev_cpu=%d next_cpu=%d backup_cpu=%d target_cpu=%d sync=%d need_idle=%d fastpath=%d placement_boost=%d rtg_cpu=%d latency=%llu stune_boosted=%d",
 		__entry->pid, __entry->comm, __entry->util, __entry->prev_cpu,
 		__entry->next_cpu, __entry->backup_cpu, __entry->target_cpu,
 		__entry->sync, __entry->need_idle, __entry->fastpath,
-		__entry->placement_boost, __entry->rtg_cpu, __entry->latency)
+		__entry->placement_boost, __entry->rtg_cpu, __entry->latency,
+		__entry->stune_boosted)
 )
 
 /*

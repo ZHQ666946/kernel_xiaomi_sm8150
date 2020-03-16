@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015-2019, The Linux Foundation. All rights reserved.
  * Copyright (C) 2013 Red Hat
  * Author: Rob Clark <robdclark@gmail.com>
  *
@@ -254,9 +254,12 @@ int sde_encoder_update_caps_for_cont_splash(struct drm_encoder *encoder,
  *
  *      TODO: manage the event at sde_kms level for forward processing.
  * @drm_enc:    Pointer to drm encoder structure
+ * @skip_pre_kickoff:    Caller can avoid pre_kickoff if it is triggering this
+ *                       event only to switch the panel TE to watchdog mode.
  * @Return:     true if successful in updating the encoder structure
  */
-int sde_encoder_display_failure_notification(struct drm_encoder *enc);
+int sde_encoder_display_failure_notification(struct drm_encoder *enc,
+	bool skip_pre_kickoff);
 
 /**
  * sde_encoder_recovery_events_enabled - checks if client has enabled
@@ -282,6 +285,14 @@ void sde_encoder_recovery_events_handler(struct drm_encoder *encoder,
 bool sde_encoder_in_clone_mode(struct drm_encoder *enc);
 
 /**
+ *sde_encoder_is_topology_ppsplit - checks if the current encoder is in
+	ppsplit topology.
+ *@drm_enc:	Pointer to drm encoder structure
+ *@Return:	true if the present topology is ppsplit
+ */
+bool sde_encoder_is_topology_ppsplit(struct drm_encoder *drm_enc);
+
+/**
  * sde_encoder_is_primary_display - checks if underlying display is primary
  *     display or not.
  * @drm_enc:    Pointer to drm encoder structure
@@ -302,5 +313,12 @@ void sde_encoder_control_idle_pc(struct drm_encoder *enc, bool enable);
  * @Return:     true if display in continuous splash
  */
 int sde_encoder_in_cont_splash(struct drm_encoder *enc);
+
+/**
+ * sde_encoder_get_ctlstart_timeout_state - checks if ctl start timeout happened
+ * @drm_enc:    Pointer to drm encoder structure
+ * @Return:     non zero value if ctl start timeout occurred
+ */
+int sde_encoder_get_ctlstart_timeout_state(struct drm_encoder *enc);
 
 #endif /* __SDE_ENCODER_H__ */

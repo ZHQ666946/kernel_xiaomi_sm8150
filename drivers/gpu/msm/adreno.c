@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2007-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2002,2007-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -651,8 +651,13 @@ static irqreturn_t adreno_irq_handler(struct kgsl_device *device)
 					&shadow_status);
 
 				KGSL_DRV_CRIT_RATELIMIT(device,
-					"AHB fence stuck in ISR: Shadow INT status=%8.8X\n",
-					shadow_status & irq_params->mask);
+					"Status=0x%x Unmasked status=0x%x Mask=0x%x\n",
+					shadow_status & irq_params->mask,
+					shadow_status, irq_params->mask);
+				adreno_set_gpu_fault(adreno_dev,
+						ADRENO_GMU_FAULT);
+				adreno_dispatcher_schedule(KGSL_DEVICE
+						(adreno_dev));
 				goto done;
 			}
 			fence_retries++;
@@ -2091,6 +2096,14 @@ static int _adreno_start(struct adreno_device *adreno_dev)
 	if (status)
 		goto error_oob_clear;
 
+	/*
+	 * At this point it is safe to assume that we recovered. Setting
+	 * this field allows us to take a new snapshot for the next failure
+	 * if we are prioritizing the first unrecoverable snapshot.
+	 */
+	if (device->snapshot)
+		device->snapshot->recovered = true;
+
 	/* Start the dispatcher */
 	adreno_dispatcher_start(device);
 
@@ -3097,6 +3110,9 @@ int adreno_spin_idle(struct adreno_device *adreno_dev, unsigned int timeout)
 		if (adreno_isidle(KGSL_DEVICE(adreno_dev)))
 			return 0;
 
+		/* relax tight loop */
+		cond_resched();
+
 	} while (time_before(jiffies, wait));
 
 	/*
@@ -3325,6 +3341,12 @@ int adreno_gmu_fenced_write(struct adreno_device *adreno_dev,
 		return 0;
 
 	for (i = 0; i < GMU_CORE_LONG_WAKEUP_RETRY_LIMIT; i++) {
+		/*
+		 * Make sure the previous register write is posted before
+		 * checking the fence status
+		 */
+		mb();
+
 		adreno_read_gmureg(adreno_dev, ADRENO_REG_GMU_AHB_FENCE_STATUS,
 			&status);
 
@@ -3690,7 +3712,7 @@ static void adreno_power_stats(struct kgsl_device *device,
 		if (gpudev->read_throttling_counters) {
 			adj = gpudev->read_throttling_counters(adreno_dev);
 			if (adj < 0 && -adj > gpu_busy)
-				adj = -gpu_busy;
+				adj = 0;
 
 			gpu_busy += adj;
 		}

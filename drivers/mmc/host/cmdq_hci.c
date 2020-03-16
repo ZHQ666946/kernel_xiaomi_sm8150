@@ -888,11 +888,13 @@ static void cmdq_finish_data(struct mmc_host *mmc, unsigned int tag)
 
 	cmdq_runtime_pm_put(cq_host);
 
-	if (cq_host->ops->crypto_cfg_end) {
-		err = cq_host->ops->crypto_cfg_end(mmc, mrq);
-		if (err) {
-			pr_err("%s: failed to end ice config: err %d tag %d\n",
-					mmc_hostname(mmc), err, tag);
+	if (!(mrq->cmdq_req->cmdq_req_flags & DCMD)) {
+		if (cq_host->ops->crypto_cfg_end) {
+			err = cq_host->ops->crypto_cfg_end(mmc, mrq);
+			if (err) {
+				pr_err("%s: failed to end ice config: err %d tag %d\n",
+						mmc_hostname(mmc), err, tag);
+			}
 		}
 	}
 	if (!(cq_host->caps & CMDQ_CAP_CRYPTO_SUPPORT) &&
@@ -1018,10 +1020,10 @@ irqreturn_t cmdq_irq(struct mmc_host *mmc, int err)
 			else
 				mrq->cmd->error = err;
 			/*
-			 * Get ADMA descriptor memory in case of ADMA
+			 * Get ADMA descriptor memory in case of real ADMA
 			 * error for debug.
 			 */
-			if (err == -EIO)
+			if (err == -EIO && !err_inject)
 				cmdq_dump_adma_mem(cq_host);
 			goto skip_cqterri;
 		}
@@ -1143,9 +1145,9 @@ skip_cqterri:
 		}
 
 		if (err_inject && err == -ETIMEDOUT)
-			goto out;
+			goto hac;
 		cmdq_finish_data(mmc, tag);
-		goto out;
+		goto hac;
 	} else {
 		cmdq_writel(cq_host, status, CQIS);
 	}
@@ -1154,7 +1156,7 @@ skip_cqterri:
 		/* read CQTCN and complete the request */
 		comp_status = cmdq_readl(cq_host, CQTCN);
 		if (!comp_status)
-			goto out;
+			goto hac;
 		/*
 		 * The CQTCN must be cleared before notifying req completion
 		 * to upper layers to avoid missing completion notification
@@ -1181,7 +1183,7 @@ skip_cqterri:
 			}
 		}
 	}
-
+hac:
 	if (status & CQIS_HAC) {
 		if (cq_host->ops->post_cqe_halt)
 			cq_host->ops->post_cqe_halt(mmc);
@@ -1192,7 +1194,6 @@ skip_cqterri:
 		complete(&cq_host->halt_comp);
 	}
 
-out:
 	return IRQ_HANDLED;
 }
 EXPORT_SYMBOL(cmdq_irq);

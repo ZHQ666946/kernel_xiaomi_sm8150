@@ -413,6 +413,10 @@ static void raise_exception(struct fsg_common *common, enum fsg_state new_state)
 	spin_unlock_irqrestore(&common->lock, flags);
 }
 
+static void raise_exception(struct fsg_common *common, enum fsg_state new_state)
+{
+	__raise_exception(common, new_state, NULL);
+}
 
 /*-------------------------------------------------------------------------*/
 

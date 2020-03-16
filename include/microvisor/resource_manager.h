@@ -205,15 +205,15 @@ struct res_mgr_sglist {
  * Top-level message structure
  */
 struct res_mgr_msg {
-	uint32_t msg_id;
-	union {
-		bool success;
-		struct {
-			struct boot_mgr_start_params start_params;
-		} boot_mgr;
-		struct {
-			uint32_t handle;
-			struct res_mgr_sglist sglist;
-		} securecam;
-	};
+    uint32_t msg_id;
+    union {
+        bool success;
+        struct {
+            struct boot_mgr_start_params start_params;
+        } boot_mgr;
+        struct {
+            uint32_t handle;
+            struct res_mgr_sglist sglist;
+        } securecam;
+    };
 };

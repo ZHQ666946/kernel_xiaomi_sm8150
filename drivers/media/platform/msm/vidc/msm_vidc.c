@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1591,6 +1591,12 @@ int msm_vidc_private(void *vidc_inst, unsigned int cmd,
 	int rc = 0;
 	struct msm_vidc_inst *inst = (struct msm_vidc_inst *)vidc_inst;
 
+	if (cmd != VIDIOC_VIDEO_CMD) {
+		dprintk(VIDC_ERR,
+			"%s: invalid private cmd %#x\n", __func__, cmd);
+		return -ENOIOCTLCMD;
+	}
+
 	if (!inst || !arg) {
 		dprintk(VIDC_ERR, "%s: invalid args\n", __func__);
 		return -EINVAL;
@@ -1649,6 +1655,7 @@ static int msm_vidc_op_s_ctrl(struct v4l2_ctrl *ctrl)
 
 	int rc = 0, c = 0;
 	struct msm_vidc_inst *inst;
+	const char *ctrl_name = NULL;
 
 	if (!ctrl) {
 		dprintk(VIDC_ERR, "%s invalid parameters for ctrl\n", __func__);
@@ -1672,9 +1679,12 @@ static int msm_vidc_op_s_ctrl(struct v4l2_ctrl *ctrl)
 			}
 		}
 	}
-	if (rc)
+	if (rc) {
+		ctrl_name = v4l2_ctrl_get_name(ctrl->id);
 		dprintk(VIDC_ERR, "Failed setting control: Inst = %pK (%s)\n",
-				inst, v4l2_ctrl_get_name(ctrl->id));
+			inst, ctrl_name ? ctrl_name : "Invalid ctrl");
+	}
+
 	return rc;
 }
 static int try_get_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
@@ -1760,6 +1770,15 @@ static int try_get_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 	case V4L2_CID_MPEG_VIDC_VIDEO_STREAM_FORMAT:
 		ctrl->val =
 		inst->capability.nal_stream_format.nal_stream_format_supported;
+		break;
+	case V4L2_CID_MPEG_VIDC_VIDEO_ROI_TYPE:
+		if (!inst->core || !inst->core->platform_data)
+			return -EINVAL;
+
+		ctrl->val = (inst->core->platform_data->vpu_ver ==
+				VPU_VERSION_4) ?
+			V4L2_CID_MPEG_VIDC_VIDEO_ROI_TYPE_2BIT :
+			V4L2_CID_MPEG_VIDC_VIDEO_ROI_TYPE_2BYTE;
 		break;
 	default:
 		/*
@@ -1877,6 +1896,7 @@ void *msm_vidc_open(int core_id, int session_type)
 	inst->clk_data.sys_cache_bw = 0;
 	inst->clk_data.bitrate = 0;
 	inst->clk_data.core_id = VIDC_CORE_ID_DEFAULT;
+	inst->clk_data.work_route = 1;
 	inst->bit_depth = MSM_VIDC_BIT_DEPTH_8;
 	inst->pic_struct = MSM_VIDC_PIC_STRUCT_PROGRESSIVE;
 	inst->colour_space = MSM_VIDC_BT601_6_525;

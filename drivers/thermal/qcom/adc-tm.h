@@ -323,6 +323,9 @@ struct adc_tm_linear_graph {
 	s32 gnd;
 };
 
+int therm_fwd_scale(int64_t code, uint32_t adc_hc_vdd_ref_mv,
+				const struct adc_tm_data *data);
+
 void adc_tm_scale_therm_voltage_100k(struct adc_tm_config *param,
 				const struct adc_tm_data *data);
 
@@ -332,6 +335,10 @@ int32_t adc_tm_absolute_rthr(const struct adc_tm_data *data,
 void notify_adc_tm_fn(struct work_struct *work);
 
 struct adc_tm_chip *get_adc_tm(struct device *dev, const char *name);
+int32_t adc_tm5_channel_measure(struct adc_tm_chip *chip,
+					struct adc_tm_param *param);
+int32_t adc_tm5_disable_chan_meas(struct adc_tm_chip *chip,
+					struct adc_tm_param *param);
 
 int adc_tm_is_valid(struct adc_tm_chip *chip);
 

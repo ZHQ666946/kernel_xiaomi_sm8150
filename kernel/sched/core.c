@@ -437,10 +437,11 @@ void wake_q_add(struct wake_q_head *head, struct task_struct *task)
 	 * its already queued (either by us or someone else) and will get the
 	 * wakeup due to that.
 	 *
-	 * This cmpxchg() implies a full barrier, which pairs with the write
-	 * barrier implied by the wakeup in wake_up_q().
+	 * In order to ensure that a pending wakeup will observe our pending
+	 * state, even in the failed case, an explicit smp_mb() must be used.
 	 */
-	if (cmpxchg(&node->next, NULL, WAKE_Q_TAIL))
+	smp_mb__before_atomic();
+	if (cmpxchg_relaxed(&node->next, NULL, WAKE_Q_TAIL))
 		return;
 
 	head->count++;
@@ -1837,17 +1838,8 @@ void scheduler_ipi(void)
 	 */
 	preempt_fold_need_resched();
 
-	if (llist_empty(&this_rq()->wake_list) && !got_nohz_idle_kick()
-		&& !got_boost_kick())
+	if (llist_empty(&this_rq()->wake_list) && !got_nohz_idle_kick())
 		return;
-
-	if (got_boost_kick()) {
-		struct rq *rq = cpu_rq(cpu);
-
-		if (rq->curr->sched_class == &fair_sched_class)
-			check_for_migration(rq, rq->curr);
-		clear_boost_kick(cpu);
-	}
 
 	/*
 	 * Not all reschedule IPI handlers call irq_enter/irq_exit, since
@@ -4908,9 +4900,8 @@ out_put_task:
 }
 
 char sched_lib_name[LIB_PATH_LENGTH];
-unsigned int sched_lib_mask_check;
 unsigned int sched_lib_mask_force;
-static inline bool is_sched_lib_based_app(pid_t pid)
+bool is_sched_lib_based_app(pid_t pid)
 {
 	const char *name = NULL;
 	struct vm_area_struct *vma;
@@ -4962,19 +4953,6 @@ put_task_struct:
 	return found;
 }
 
-long msm_sched_setaffinity(pid_t pid, struct cpumask *new_mask)
-{
-	if (sched_lib_mask_check != 0 && sched_lib_mask_force != 0 &&
-		(cpumask_bits(new_mask)[0] == sched_lib_mask_check) &&
-		is_sched_lib_based_app(pid)) {
-
-		cpumask_t forced_mask = { {sched_lib_mask_force} };
-
-		cpumask_copy(new_mask, &forced_mask);
-	}
-	return sched_setaffinity(pid, new_mask);
-}
-
 static int get_user_cpu_mask(unsigned long __user *user_mask_ptr, unsigned len,
 			     struct cpumask *new_mask)
 {
@@ -5005,7 +4983,7 @@ SYSCALL_DEFINE3(sched_setaffinity, pid_t, pid, unsigned int, len,
 
 	retval = get_user_cpu_mask(user_mask_ptr, len, new_mask);
 	if (retval == 0)
-		retval = msm_sched_setaffinity(pid, new_mask);
+		retval = sched_setaffinity(pid, new_mask);
 	free_cpumask_var(new_mask);
 	return retval;
 }
@@ -5304,7 +5282,7 @@ long __sched io_schedule_timeout(long timeout)
 }
 EXPORT_SYMBOL(io_schedule_timeout);
 
-void io_schedule(void)
+void __sched io_schedule(void)
 {
 	int token;
 
@@ -6181,15 +6159,10 @@ int sched_cpu_activate(unsigned int cpu)
 
 #ifdef CONFIG_SCHED_SMT
 	/*
-	 * The sched_smt_present static key needs to be evaluated on every
-	 * hotplug event because at boot time SMT might be disabled when
-	 * the number of booted CPUs is limited.
-	 *
-	 * If then later a sibling gets hotplugged, then the key would stay
-	 * off and SMT scheduling would never be functional.
+	 * When going up, increment the number of cores with SMT present.
 	 */
-	if (cpumask_weight(cpu_smt_mask(cpu)) > 1)
-		static_branch_enable_cpuslocked(&sched_smt_present);
+	if (cpumask_weight(cpu_smt_mask(cpu)) == 2)
+		static_branch_inc_cpuslocked(&sched_smt_present);
 #endif
 	set_cpu_active(cpu, true);
 
@@ -6215,6 +6188,7 @@ int sched_cpu_activate(unsigned int cpu)
 	rq_unlock_irqrestore(rq, &rf);
 
 	update_max_interval();
+	walt_update_min_max_capacity();
 
 	return 0;
 }
@@ -6231,7 +6205,19 @@ int sched_cpu_deactivate(unsigned int cpu)
 	 *
 	 * Do sync before park smpboot threads to take care the rcu boost case.
 	 */
-	synchronize_rcu_mult(call_rcu, call_rcu_sched);
+
+#ifdef CONFIG_PREEMPT
+	synchronize_sched();
+#endif
+	synchronize_rcu();
+
+#ifdef CONFIG_SCHED_SMT
+	/*
+	 * When going down, decrement the number of cores with SMT present.
+	 */
+	if (cpumask_weight(cpu_smt_mask(cpu)) == 2)
+		static_branch_dec_cpuslocked(&sched_smt_present);
+#endif
 
 	if (!sched_smp_initialized)
 		return 0;
@@ -6242,6 +6228,7 @@ int sched_cpu_deactivate(unsigned int cpu)
 		return ret;
 	}
 	sched_domains_numa_masks_clear(cpu);
+	walt_update_min_max_capacity();
 	return 0;
 }
 
@@ -6305,14 +6292,17 @@ void __init sched_init_smp(void)
 	/*
 	 * There's no userspace yet to cause hotplug operations; hence all the
 	 * CPU masks are stable and all blatant races in the below code cannot
-	 * happen.
+	 * happen. The hotplug lock is nevertheless taken to satisfy lockdep,
+	 * but there won't be any contention on it.
 	 */
+	cpus_read_lock();
 	mutex_lock(&sched_domains_mutex);
 	sched_init_domains(cpu_active_mask);
 	cpumask_andnot(non_isolated_cpus, cpu_possible_mask, cpu_isolated_map);
 	if (cpumask_empty(non_isolated_cpus))
 		cpumask_set_cpu(smp_processor_id(), non_isolated_cpus);
 	mutex_unlock(&sched_domains_mutex);
+	cpus_read_unlock();
 
 	update_cluster_topology();
 
@@ -6903,8 +6893,8 @@ static void sched_update_down_migrate_values(int cap_margin_levels,
 	}
 }
 
-static int sched_update_updown_migrate_values(unsigned int *data,
-					int cap_margin_levels, int ret)
+static void sched_update_updown_migrate_values(unsigned int *data,
+					      int cap_margin_levels)
 {
 	int i, cpu;
 	static const struct cpumask *cluster_cpus[MAX_CLUSTERS];
@@ -6916,15 +6906,10 @@ static int sched_update_updown_migrate_values(unsigned int *data,
 	}
 
 	if (data == &sysctl_sched_capacity_margin_up[0])
-		sched_update_up_migrate_values(cap_margin_levels,
-							cluster_cpus);
-	else if (data == &sysctl_sched_capacity_margin_down[0])
-		sched_update_down_migrate_values(cap_margin_levels,
-							cluster_cpus);
+		sched_update_up_migrate_values(cap_margin_levels, cluster_cpus);
 	else
-		ret = -EINVAL;
-
-	return ret;
+		sched_update_down_migrate_values(cap_margin_levels,
+						 cluster_cpus);
 }
 
 int sched_updown_migrate_handler(struct ctl_table *table, int write,
@@ -6950,6 +6935,16 @@ int sched_updown_migrate_handler(struct ctl_table *table, int write,
 		goto unlock_mutex;
 	}
 
+	if (!write) {
+		ret = proc_douintvec_capacity(table, write, buffer, lenp, ppos);
+		goto unlock_mutex;
+	}
+
+	/*
+	 * Cache the old values so that they can be restored
+	 * if either the write fails (for example out of range values)
+	 * or the downmigrate and upmigrate are not in sync.
+	 */
 	old_val = kzalloc(table->maxlen, GFP_KERNEL);
 	if (!old_val) {
 		ret = -ENOMEM;
@@ -6960,19 +6955,22 @@ int sched_updown_migrate_handler(struct ctl_table *table, int write,
 
 	ret = proc_douintvec_capacity(table, write, buffer, lenp, ppos);
 
-	if (!ret && write) {
-		for (i = 0; i < cap_margin_levels; i++) {
-			if (sysctl_sched_capacity_margin_up[i] >
-					sysctl_sched_capacity_margin_down[i]) {
-				memcpy(data, old_val, table->maxlen);
-				ret = -EINVAL;
-				goto free_old_val;
-			}
-		}
-
-		ret = sched_update_updown_migrate_values(data,
-						cap_margin_levels, ret);
+	if (ret) {
+		memcpy(data, old_val, table->maxlen);
+		goto free_old_val;
 	}
+
+	for (i = 0; i < cap_margin_levels; i++) {
+		if (sysctl_sched_capacity_margin_up[i] >
+				sysctl_sched_capacity_margin_down[i]) {
+			memcpy(data, old_val, table->maxlen);
+			ret = -EINVAL;
+			goto free_old_val;
+		}
+	}
+
+	sched_update_updown_migrate_values(data, cap_margin_levels);
+
 free_old_val:
 	kfree(old_val);
 unlock_mutex:
@@ -7060,10 +7058,6 @@ static int cpu_cgroup_can_attach(struct cgroup_taskset *tset)
 #ifdef CONFIG_RT_GROUP_SCHED
 		if (!sched_rt_can_attach(css_tg(css), task))
 			return -EINVAL;
-#else
-		/* We don't support RT-tasks being in separate groups */
-		if (task->sched_class != &fair_sched_class)
-			return -EINVAL;
 #endif
 		/*
 		 * Serialize against wake_up_new_task() such that if its
@@ -7098,6 +7092,8 @@ static void cpu_cgroup_attach(struct cgroup_taskset *tset)
 static int cpu_shares_write_u64(struct cgroup_subsys_state *css,
 				struct cftype *cftype, u64 shareval)
 {
+	if (shareval > scale_load_down(ULONG_MAX))
+		shareval = MAX_SHARES;
 	return sched_group_set_shares(css_tg(css), scale_load(shareval));
 }
 
@@ -7200,8 +7196,10 @@ int tg_set_cfs_quota(struct task_group *tg, long cfs_quota_us)
 	period = ktime_to_ns(tg->cfs_bandwidth.period);
 	if (cfs_quota_us < 0)
 		quota = RUNTIME_INF;
-	else
+	else if ((u64)cfs_quota_us <= U64_MAX / NSEC_PER_USEC)
 		quota = (u64)cfs_quota_us * NSEC_PER_USEC;
+	else
+		return -EINVAL;
 
 	return tg_set_cfs_bandwidth(tg, period, quota);
 }
@@ -7222,6 +7220,9 @@ long tg_get_cfs_quota(struct task_group *tg)
 int tg_set_cfs_period(struct task_group *tg, long cfs_period_us)
 {
 	u64 quota, period;
+
+	if ((u64)cfs_period_us > U64_MAX / NSEC_PER_USEC)
+		return -EINVAL;
 
 	period = (u64)cfs_period_us * NSEC_PER_USEC;
 	quota = tg->cfs_bandwidth.quota;

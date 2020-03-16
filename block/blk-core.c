@@ -341,7 +341,6 @@ void blk_sync_queue(struct request_queue *q)
 		struct blk_mq_hw_ctx *hctx;
 		int i;
 
-		cancel_delayed_work_sync(&q->requeue_work);
 		queue_for_each_hw_ctx(q, hctx, i)
 			cancel_delayed_work_sync(&hctx->run_work);
 	} else {
@@ -1433,6 +1432,9 @@ static struct request *blk_old_get_request(struct request_queue *q,
 	/* q->queue_lock is unlocked at this point */
 	rq->__data_len = 0;
 	rq->__sector = (sector_t) -1;
+#ifdef CONFIG_PFK
+	rq->__dun = 0;
+#endif
 	rq->bio = rq->biotail = NULL;
 	return rq;
 }
@@ -1657,7 +1659,7 @@ bool bio_attempt_front_merge(struct request_queue *q, struct request *req,
 	req->bio = bio;
 
 #ifdef CONFIG_PFK
-	WARN_ON(req->__dun || bio->bi_iter.bi_dun);
+	req->__dun = bio->bi_iter.bi_dun;
 #endif
 	req->__sector = bio->bi_iter.bi_sector;
 	req->__data_len += bio->bi_iter.bi_size;

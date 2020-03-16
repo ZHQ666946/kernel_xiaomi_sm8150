@@ -39,6 +39,7 @@
 #include <asm/atomic.h>
 #include <asm/barrier.h>
 #include <asm/bug.h>
+#include <asm/cpufeature.h>
 #include <asm/debug-monitors.h>
 #include <asm/esr.h>
 #include <asm/insn.h>

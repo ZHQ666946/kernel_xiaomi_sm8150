@@ -328,8 +328,7 @@ static int get_victim_by_default(struct f2fs_sb_info *sbi,
 	p.min_cost = get_max_cost(sbi, &p);
 
 	if (*result != NULL_SEGNO) {
-		if (IS_DATASEG(get_seg_entry(sbi, *result)->type) &&
-			get_valid_blocks(sbi, *result, false) &&
+		if (get_valid_blocks(sbi, *result, false) &&
 			!sec_usage_check(sbi, GET_SEC_FROM_SEG(sbi, *result)))
 			p.min_segno = *result;
 		goto out;
@@ -526,7 +525,11 @@ next_step:
 			continue;
 		}
 
-		get_node_info(sbi, nid, &ni);
+		if (get_node_info(sbi, nid, &ni)) {
+			f2fs_put_page(node_page, 1);
+			continue;
+		}
+
 		if (ni.blk_addr != start_addr + off) {
 			f2fs_put_page(node_page, 1);
 			continue;
@@ -585,7 +588,10 @@ static bool is_alive(struct f2fs_sb_info *sbi, struct f2fs_summary *sum,
 	if (IS_ERR(node_page))
 		return false;
 
-	get_node_info(sbi, nid, dni);
+	if (get_node_info(sbi, nid, dni)) {
+		f2fs_put_page(node_page, 1);
+		return false;
+	}
 
 	if (sum->version != dni->version) {
 		f2fs_msg(sbi->sb, KERN_WARNING,
@@ -665,7 +671,11 @@ static int move_data_block(struct inode *inode, block_t bidx,
 	 */
 	f2fs_wait_on_page_writeback(page, DATA, true);
 
-	get_node_info(fio.sbi, dn.nid, &ni);
+	err = get_node_info(fio.sbi, dn.nid, &ni);
+	if (err)
+		goto put_out;
+
+
 	set_summary(&sum, dn.nid, dn.ofs_in_node, ni.version);
 
 	/* read page */
@@ -987,6 +997,18 @@ static int do_garbage_collect(struct f2fs_sb_info *sbi,
 	/* reference all summary page */
 	while (segno < end_segno) {
 		sum_page = get_sum_page(sbi, segno++);
+		if (IS_ERR(sum_page)) {
+			int err = PTR_ERR(sum_page);
+
+			end_segno = segno - 1;
+			for (segno = start_segno; segno < end_segno; segno++) {
+				sum_page = find_get_page(META_MAPPING(sbi),
+						GET_SUM_BLOCK(sbi, segno));
+				f2fs_put_page(sum_page, 0);
+				f2fs_put_page(sum_page, 0);
+			}
+			return err;
+		}
 		unlock_page(sum_page);
 	}
 
@@ -999,9 +1021,9 @@ static int do_garbage_collect(struct f2fs_sb_info *sbi,
 					GET_SUM_BLOCK(sbi, segno));
 		f2fs_put_page(sum_page, 0);
 
-		if (get_valid_blocks(sbi, segno, false) == 0 ||
-				!PageUptodate(sum_page) ||
-				unlikely(f2fs_cp_error(sbi)))
+		if (get_valid_blocks(sbi, segno, false) == 0)
+			goto freed;
+		if (!PageUptodate(sum_page) || unlikely(f2fs_cp_error(sbi)))
 			goto next;
 
 		sum = page_address(sum_page);
@@ -1029,6 +1051,7 @@ static int do_garbage_collect(struct f2fs_sb_info *sbi,
 
 		stat_inc_seg_count(sbi, type, gc_type);
 
+freed:
 		if (gc_type == FG_GC &&
 				get_valid_blocks(sbi, segno, false) == 0)
 			seg_freed++;
@@ -1139,7 +1162,7 @@ stop:
 
 	put_gc_inode(&gc_list);
 
-	if (sync)
+	if (sync && !ret)
 		ret = sec_freed ? 0 : -EAGAIN;
 	return ret;
 }
@@ -1160,7 +1183,7 @@ void build_gc_manager(struct f2fs_sb_info *sbi)
 	sbi->gc_pin_file_threshold = DEF_GC_FAILED_PINNED_FILES;
 
 	/* give warm/cold data area from slower device */
-	if (sbi->s_ndevs && sbi->segs_per_sec == 1)
+	if (f2fs_is_multi_device(sbi) && sbi->segs_per_sec == 1)
 		SIT_I(sbi)->last_victim[ALLOC_NEXT] =
 				GET_SEGNO(sbi, FDEV(0).end_blk) + 1;
 }

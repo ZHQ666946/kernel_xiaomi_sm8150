@@ -152,6 +152,7 @@ void sdhci_dumpregs(struct sdhci_host *host)
 	}
 
 	host->mmc->err_occurred = true;
+	host->mmc->last_failed_rq_time = ktime_get();
 
 	if (host->ops->dump_vendor_regs)
 		host->ops->dump_vendor_regs(host);
@@ -248,8 +249,12 @@ retry_reset:
 			SDHCI_INT_STATUS);
 
 	/* hw clears the bit when it's done */
-	while (sdhci_readb(host, SDHCI_SOFTWARE_RESET) & mask) {
-		if (ktime_after(ktime_get(), timeout)) {
+	while (1) {
+		bool timedout = ktime_after(ktime_get(), timeout);
+
+		if (!(sdhci_readb(host, SDHCI_SOFTWARE_RESET) & mask))
+			break;
+		if (timedout) {
 			pr_err("%s: Reset 0x%x never completed.\n",
 				mmc_hostname(host->mmc), (int)mask);
 			MMC_TRACE(host->mmc, "%s: Reset 0x%x never completed\n",
@@ -312,8 +317,6 @@ static void sdhci_do_reset(struct sdhci_host *host, u8 mask)
 		/* Resetting the controller clears many */
 		host->preset_enabled = false;
 	}
-	if (host->is_crypto_en)
-		host->crypto_reset_reqd = true;
 }
 
 static void sdhci_set_default_irqs(struct sdhci_host *host)
@@ -1576,9 +1579,13 @@ void sdhci_enable_clk(struct sdhci_host *host, u16 clk)
 
 	/* Wait max 20 ms */
 	timeout = ktime_add_ms(ktime_get(), 20);
-	while (!((clk = sdhci_readw(host, SDHCI_CLOCK_CONTROL))
-		& SDHCI_CLOCK_INT_STABLE)) {
-		if (ktime_after(ktime_get(), timeout)) {
+	while (1) {
+		bool timedout = ktime_after(ktime_get(), timeout);
+
+		clk = sdhci_readw(host, SDHCI_CLOCK_CONTROL);
+		if (clk & SDHCI_CLOCK_INT_STABLE)
+			break;
+		if (timedout) {
 			pr_err("%s: Internal clock never stabilised.\n",
 			       mmc_hostname(host->mmc));
 			MMC_TRACE(host->mmc,
@@ -1829,14 +1836,15 @@ static int sdhci_crypto_cfg(struct sdhci_host *host, struct mmc_request *mrq,
 {
 	int err = 0;
 
-	if (host->crypto_reset_reqd && host->ops->crypto_engine_reset) {
+	if (host->mmc->inlinecrypt_reset_needed &&
+			host->ops->crypto_engine_reset) {
 		err = host->ops->crypto_engine_reset(host);
 		if (err) {
 			pr_err("%s: crypto reset failed\n",
 					mmc_hostname(host->mmc));
 			goto out;
 		}
-		host->crypto_reset_reqd = false;
+		host->mmc->inlinecrypt_reset_needed = false;
 	}
 
 	if (host->ops->crypto_engine_cfg) {
@@ -2611,8 +2619,8 @@ static void __sdhci_execute_tuning(struct sdhci_host *host, u32 opcode)
 		sdhci_send_tuning(host, opcode);
 
 		if (!host->tuning_done) {
-			pr_info("%s: Tuning timeout, falling back to fixed sampling clock\n",
-				mmc_hostname(host->mmc));
+			pr_debug("%s: Tuning timeout, falling back to fixed sampling clock\n",
+				 mmc_hostname(host->mmc));
 			sdhci_abort_tuning(host, opcode);
 			return;
 		}
@@ -2694,9 +2702,15 @@ int sdhci_execute_tuning(struct mmc_host *mmc, u32 opcode)
 	}
 
 	if (host->ops->platform_execute_tuning) {
+		/*
+		 * Make sure re-tuning won't get triggered for the CRC errors
+		 * occurred while executing tuning
+		 */
+		mmc_retune_disable(mmc);
 		err = host->ops->platform_execute_tuning(host, opcode);
-			goto out;
-		}
+		mmc_retune_enable(mmc);
+		goto out;
+	}
 
 	host->mmc->retune_period = tuning_count;
 
@@ -3155,6 +3169,7 @@ static void sdhci_cmd_irq(struct sdhci_host *host, u32 intmask)
 static void sdhci_adma_show_error(struct sdhci_host *host)
 {
 	void *desc = host->adma_table;
+	dma_addr_t dma = host->adma_addr;
 
 	sdhci_dumpregs(host);
 
@@ -3162,18 +3177,21 @@ static void sdhci_adma_show_error(struct sdhci_host *host)
 		struct sdhci_adma2_64_desc *dma_desc = desc;
 
 		if (host->flags & SDHCI_USE_64_BIT_DMA)
-			DBG("%pK: DMA 0x%08x%08x, LEN 0x%04x, Attr=0x%02x\n",
-			    desc, le32_to_cpu(dma_desc->addr_hi),
+			SDHCI_DUMP("%08llx: DMA 0x%08x%08x, LEN 0x%04x, Attr=0x%02x\n",
+			    (unsigned long long)dma,
+			    le32_to_cpu(dma_desc->addr_hi),
 			    le32_to_cpu(dma_desc->addr_lo),
 			    le16_to_cpu(dma_desc->len),
 			    le16_to_cpu(dma_desc->cmd));
 		else
-			DBG("%pK: DMA 0x%08x, LEN 0x%04x, Attr=0x%02x\n",
-			    desc, le32_to_cpu(dma_desc->addr_lo),
+			SDHCI_DUMP("%08llx: DMA 0x%08x, LEN 0x%04x, Attr=0x%02x\n",
+			    (unsigned long long)dma,
+			    le32_to_cpu(dma_desc->addr_lo),
 			    le16_to_cpu(dma_desc->len),
 			    le16_to_cpu(dma_desc->cmd));
 
 		desc += host->desc_sz;
+		dma += host->desc_sz;
 
 		if (dma_desc->cmd & cpu_to_le16(ADMA2_END))
 			break;
@@ -3277,7 +3295,8 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 		host->mmc->err_stats[MMC_ERR_DAT_CRC]++;
 	}
 	else if (intmask & SDHCI_INT_ADMA_ERROR) {
-		pr_err("%s: ADMA error\n", mmc_hostname(host->mmc));
+		pr_err("%s: ADMA error: 0x%08x\n", mmc_hostname(host->mmc),
+		       intmask);
 		sdhci_adma_show_error(host);
 		host->mmc->err_stats[MMC_ERR_ADMA]++;
 		host->data->error = -EIO;
@@ -3572,7 +3591,11 @@ out:
 			   mmc_hostname(host->mmc), unexpected);
 		MMC_TRACE(host->mmc, "Unexpected interrupt 0x%08x.\n",
 				unexpected);
-		sdhci_dumpregs(host);
+		if (host->mmc->cmdq_ops && host->mmc->cmdq_ops->dumpstate)
+			host->mmc->cmdq_ops->dumpstate(host->mmc);
+		else
+			sdhci_dumpregs(host);
+		BUG_ON(1);
 	}
 
 	return result;
@@ -4047,14 +4070,14 @@ static int sdhci_cmdq_crypto_cfg(struct mmc_host *mmc,
 	if (!host->is_crypto_en)
 		return 0;
 
-	if (host->crypto_reset_reqd && host->ops->crypto_engine_reset) {
+	if (mmc->inlinecrypt_reset_needed && host->ops->crypto_engine_reset) {
 		err = host->ops->crypto_engine_reset(host);
 		if (err) {
 			pr_err("%s: crypto reset failed\n",
 					mmc_hostname(host->mmc));
 			goto out;
 		}
-		host->crypto_reset_reqd = false;
+		mmc->inlinecrypt_reset_needed = false;
 	}
 
 	if (host->ops->crypto_engine_cmdq_cfg) {
@@ -4523,11 +4546,13 @@ int sdhci_setup_host(struct sdhci_host *host)
 	if (host->ops->get_min_clock)
 		mmc->f_min = host->ops->get_min_clock(host);
 	else if (host->version >= SDHCI_SPEC_300) {
-		if (host->clk_mul) {
-			mmc->f_min = (host->max_clk * host->clk_mul) / 1024;
+		if (host->clk_mul)
 			max_clk = host->max_clk * host->clk_mul;
-		} else
-			mmc->f_min = host->max_clk / SDHCI_MAX_DIV_SPEC_300;
+		/*
+		 * Divided Clock Mode minimum clock rate is always less than
+		 * Programmable Clock Mode minimum clock rate.
+		 */
+		mmc->f_min = host->max_clk / SDHCI_MAX_DIV_SPEC_300;
 	} else
 		mmc->f_min = host->max_clk / SDHCI_MAX_DIV_SPEC_200;
 

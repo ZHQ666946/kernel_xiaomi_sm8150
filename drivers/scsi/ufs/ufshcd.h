@@ -3,7 +3,7 @@
  *
  * This code is based on drivers/scsi/ufs/ufshcd.h
  * Copyright (C) 2011-2013 Samsung India Software Operations
- * Copyright (c) 2013-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2019, The Linux Foundation. All rights reserved.
  *
  * Authors:
  *	Santosh Yaraganavi <santosh.sy@samsung.com>
@@ -377,6 +377,7 @@ struct ufs_hba_variant_ops {
  *						   according to tag parameter
  * @crypto_engine_reset: perform reset to the cryptographic engine
  * @crypto_engine_get_status: get errors status of the cryptographic engine
+ * @crypto_get_req_status: Check if crypto driver still holds request or not
  */
 struct ufs_hba_crypto_variant_ops {
 	int	(*crypto_req_setup)(struct ufs_hba *, struct ufshcd_lrb *lrbp,
@@ -386,6 +387,7 @@ struct ufs_hba_crypto_variant_ops {
 			struct request *);
 	int	(*crypto_engine_reset)(struct ufs_hba *);
 	int	(*crypto_engine_get_status)(struct ufs_hba *, u32 *);
+	int     (*crypto_get_req_status)(struct ufs_hba *);
 };
 
 /**
@@ -1039,6 +1041,9 @@ struct ufs_hba {
 
 	int latency_hist_enabled;
 	struct io_latency_state io_lat_s;
+
+	bool reinit_g4_rate_A;
+	bool force_g4;
 };
 
 static inline void ufshcd_mark_shutdown_ongoing(struct ufs_hba *hba)
@@ -1525,7 +1530,6 @@ static inline int ufshcd_vops_crypto_engine_reset(struct ufs_hba *hba)
 
 static inline int ufshcd_vops_crypto_engine_get_status(struct ufs_hba *hba,
 		u32 *status)
-
 {
 	if (hba->var && hba->var->crypto_vops &&
 	    hba->var->crypto_vops->crypto_engine_get_status)
@@ -1547,6 +1551,15 @@ static inline void ufshcd_vops_pm_qos_req_end(struct ufs_hba *hba,
 {
 	if (hba->var && hba->var->pm_qos_vops && hba->var->pm_qos_vops->req_end)
 		hba->var->pm_qos_vops->req_end(hba, req, lock);
+}
+
+static inline int ufshcd_vops_crypto_engine_get_req_status(struct ufs_hba *hba)
+
+{
+	if (hba->var && hba->var->crypto_vops &&
+	    hba->var->crypto_vops->crypto_get_req_status)
+		return hba->var->crypto_vops->crypto_get_req_status(hba);
+	return 0;
 }
 
 #endif /* End of Header */

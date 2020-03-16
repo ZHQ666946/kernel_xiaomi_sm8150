@@ -313,7 +313,7 @@ struct drm_dp_resource_status_notify {
 
 struct drm_dp_query_payload_ack_reply {
 	u8 port_number;
-	u8 allocated_pbn;
+	u16 allocated_pbn;
 };
 
 struct drm_dp_sideband_msg_req_body {
@@ -633,5 +633,13 @@ int drm_dp_atomic_release_vcpi_slots(struct drm_atomic_state *state,
 				     int slots);
 int drm_dp_send_power_updown_phy(struct drm_dp_mst_topology_mgr *mgr,
 				 struct drm_dp_mst_port *port, bool power_up);
+
+int drm_dp_send_dpcd_write(struct drm_dp_mst_topology_mgr *mgr,
+			   struct drm_dp_mst_port *port,
+			   int offset, int size, u8 *bytes);
+
+int drm_dp_send_dpcd_read(struct drm_dp_mst_topology_mgr *mgr,
+				 struct drm_dp_mst_port *port,
+				 int offset, int size, u8 *bytes);
 
 #endif
