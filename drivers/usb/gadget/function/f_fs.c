@@ -1167,6 +1167,7 @@ static int ffs_aio_cancel(struct kiocb *kiocb)
 	struct ffs_io_data *io_data = kiocb->private;
 	struct ffs_data *ffs = io_data->ffs;
 	struct ffs_epfile *epfile = kiocb->ki_filp->private_data;
+	unsigned long flags;
 	int value;
 
 	ENTER();

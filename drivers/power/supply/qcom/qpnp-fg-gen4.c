@@ -14,6 +14,7 @@
 #define pr_fmt(fmt)	"FG: %s: " fmt, __func__
 
 #include <linux/alarmtimer.h>
+#include <linux/irq.h>
 #include <linux/ktime.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
